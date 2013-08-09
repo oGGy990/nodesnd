@@ -7,7 +7,7 @@
 class OggVorbisDecoder : public node::ObjectWrap
 {
 public:
-    static void Init(v8::Handle<v8::Object> p_exports);
+    static void Initialize(v8::Handle<v8::Object> p_exports);
 
 private:
     OggVorbisDecoder();

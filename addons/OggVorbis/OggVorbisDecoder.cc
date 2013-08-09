@@ -35,7 +35,7 @@ OggVorbisDecoder::~OggVorbisDecoder()
     ogg_sync_clear(&m_oggsync);
 }
 
-void OggVorbisDecoder::Init(Handle<Object> p_exports)
+void OggVorbisDecoder::Initialize(Handle<Object> p_exports)
 {
     Local<FunctionTemplate> tpl = FunctionTemplate::New(New);
     tpl->SetClassName(String::NewSymbol("OggVorbisDecoder"));

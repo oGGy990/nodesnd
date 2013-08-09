@@ -4,9 +4,10 @@
             "target_name" : "OggVorbis",
             "sources" : [
                 "addons/OggVorbis/OggVorbis.cc",
-                "addons/OggVorbis/OggVorbisDecoder.cc"
+                "addons/OggVorbis/OggVorbisDecoder.cc",
+                "addons/OggVorbis/OggVorbisEncoder.cc"
             ],
-            "libraries" : [ "-lvorbis" ]
+            "libraries" : [ "-lvorbis -lvorbisenc" ]
         }
     ]
 }
