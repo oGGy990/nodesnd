@@ -9,4 +9,4 @@ var prio = new nodesnd.PrioritySource();
 prio.addSource(dj);
 prio.addSource(safe);
 
-var out = new nodesnd.IcecastOutput('lw3.t4e.dj', 3000, '/test.ogg', 'source', '***', new nodesnd.OggVorbisEncoder(2, 44100, 128), {'name':'NodeJS Test'}, prio);
+var out = new nodesnd.IcecastOutput('lw3.t4e.dj', 3000, '/test.ogg', 'source', '****', new nodesnd.OggVorbisEncoder(2, 44100, 128), {'name':'NodeJS Test'}, prio);

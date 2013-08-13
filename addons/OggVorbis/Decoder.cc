@@ -1,4 +1,4 @@
-#include "OggVorbisDecoder.hh"
+#include "Decoder.hh"
 #include <node_buffer.h>
 #include <cstring>
 #include <cstdlib>
@@ -6,6 +6,7 @@
 using namespace v8;
 
 OggVorbisDecoder::OggVorbisDecoder() :
+    Decoder(),
     m_serialno(-1),
     m_numpackets(0),
     m_channels(0),
@@ -19,6 +20,8 @@ OggVorbisDecoder::OggVorbisDecoder() :
 
 OggVorbisDecoder::~OggVorbisDecoder()
 {
+    finishProcessing();
+
     if(m_initialized > 2)
     {
         vorbis_block_clear(&m_vorbisblock);
@@ -41,7 +44,9 @@ void OggVorbisDecoder::Initialize(Handle<Object> p_exports)
     tpl->SetClassName(String::NewSymbol("OggVorbisDecoder"));
     tpl->InstanceTemplate()->SetInternalFieldCount(1);
 
-    tpl->PrototypeTemplate()->Set(String::NewSymbol("decode"), FunctionTemplate::New(decode));
+    tpl->Inherit(Template());
+
+    NODE_SET_METHOD(tpl->GetFunction(), "types", Types);
 
     Persistent<Function> constructor = Persistent<Function>::New(tpl->GetFunction());
     p_exports->Set(String::NewSymbol("OggVorbisDecoder"), constructor);
@@ -57,70 +62,75 @@ Handle<Value> OggVorbisDecoder::New(const Arguments &p_args)
     return p_args.This();
 }
 
-Handle<v8::Value> OggVorbisDecoder::decode(const Arguments &p_args)
+Handle<Value> OggVorbisDecoder::Types(const Arguments &p_args)
 {
     HandleScope scope;
 
-    // Get arguments
-    OggVorbisDecoder *self = node::ObjectWrap::Unwrap<OggVorbisDecoder>(p_args.This());
-    const char *data = node::Buffer::Data(p_args[0]->ToObject());
-    unsigned int len = node::Buffer::Length(p_args[0]->ToObject());
+    Local<Array> myTypes = Array::New(1);
+    myTypes->Set(0, String::New("application/ogg"));
 
+    return scope.Close(myTypes);
+}
+
+void OggVorbisDecoder::decode(unsigned char *p_data, unsigned int p_len, float **p_samples, unsigned int *p_sampleslen)
+{
     float *outbuffer = 0;
     unsigned int outlen = 0;
 
     // Decode input
-    char *syncbuffer = ogg_sync_buffer(&self->m_oggsync, len);
-    memcpy(syncbuffer, data, len);
-    ogg_sync_wrote(&self->m_oggsync, len);
+    char *syncbuffer = ogg_sync_buffer(&m_oggsync, p_len);
+    memcpy(syncbuffer, p_data, p_len);
+    ogg_sync_wrote(&m_oggsync, p_len);
 
-    while(1 == ogg_sync_pageout(&self->m_oggsync, &self->m_oggpage))
+    while(1 == ogg_sync_pageout(&m_oggsync, &m_oggpage))
     {
         // New logical stream?
-        if(ogg_page_serialno(&self->m_oggpage) != self->m_serialno && ogg_page_bos(&self->m_oggpage))
+        if(ogg_page_serialno(&m_oggpage) != m_serialno && ogg_page_bos(&m_oggpage))
         {
-            self->m_serialno = ogg_page_serialno(&self->m_oggpage);
-            ogg_stream_reset_serialno(&self->m_oggstream, self->m_serialno);
+            m_serialno = ogg_page_serialno(&m_oggpage);
+            ogg_stream_reset_serialno(&m_oggstream, m_serialno);
         }
 
-        ogg_stream_pagein(&self->m_oggstream, &self->m_oggpage);
+        ogg_stream_pagein(&m_oggstream, &m_oggpage);
 
-        while(ogg_stream_packetout(&self->m_oggstream, &self->m_oggpacket) == 1)
+        while(ogg_stream_packetout(&m_oggstream, &m_oggpacket) == 1)
         {
             // Very first packet?
-            if(!self->m_numpackets)
+            if(!m_numpackets)
             {
                 // Not a vorbis stream?
-                if(!vorbis_synthesis_idheader(&self->m_oggpacket))
+                if(!vorbis_synthesis_idheader(&m_oggpacket))
                 {
                     /*dLog->error("OGG/Vorbis", QString("OGG stream is no vorbis stream!"));
                     stop();*/
                     free(outbuffer);
-                    return scope.Close(Null());
+                    return;
                 }
 
-                vorbis_info_init(&self->m_vorbisinfo);
-                vorbis_comment_init(&self->m_vorbiscomment);
-                self->m_initialized = 2;
+                vorbis_info_init(&m_vorbisinfo);
+                vorbis_comment_init(&m_vorbiscomment);
+                m_initialized = 2;
             }
-            ++self->m_numpackets;
+            ++m_numpackets;
 
             // Feed 3 headers
-            if(self->m_numpackets < 4)
+            if(m_numpackets < 4)
             {
-                vorbis_synthesis_headerin(&self->m_vorbisinfo, &self->m_vorbiscomment, &self->m_oggpacket);
+                vorbis_synthesis_headerin(&m_vorbisinfo, &m_vorbiscomment, &m_oggpacket);
                 continue;
             }
             // First data packet, initialize synthesis unit
-            else if(self->m_numpackets == 4)
+            else if(m_numpackets == 4)
             {
-                vorbis_synthesis_init(&self->m_vorbisdsp, &self->m_vorbisinfo);
-                vorbis_block_init(&self->m_vorbisdsp, &self->m_vorbisblock);
-                self->m_initialized = 3;
+                vorbis_synthesis_init(&m_vorbisdsp, &m_vorbisinfo);
+                vorbis_block_init(&m_vorbisdsp, &m_vorbisblock);
+                m_initialized = 3;
 
-                self->m_channels = self->m_vorbisinfo.channels;
-                self->m_rate = self->m_vorbisinfo.rate;
-                self->m_bitrate = self->m_vorbisinfo.bitrate_nominal;
+                m_channels = m_vorbisinfo.channels;
+                m_rate = m_vorbisinfo.rate;
+                m_bitrate = m_vorbisinfo.bitrate_nominal;
+                setChannels(m_vorbisinfo.channels);
+                setSamplerate(m_vorbisinfo.rate);
                 /*emit newFormat(m_channels, m_rate);
 
                 dLog->info("OGG/Vorbis", QString("Stream ready: %1 Channels @ %2Hz, Bitrate %3kbps")
@@ -128,17 +138,17 @@ Handle<v8::Value> OggVorbisDecoder::decode(const Arguments &p_args)
             }
 
             // Synthesize current block
-            vorbis_synthesis(&self->m_vorbisblock, &self->m_oggpacket);
-            vorbis_synthesis_blockin(&self->m_vorbisdsp, &self->m_vorbisblock);
+            vorbis_synthesis(&m_vorbisblock, &m_oggpacket);
+            vorbis_synthesis_blockin(&m_vorbisdsp, &m_vorbisblock);
 
             // Get all samples
             float **samples;
-            int numsamples = vorbis_synthesis_pcmout(&self->m_vorbisdsp, &samples);
-            vorbis_synthesis_read(&self->m_vorbisdsp, numsamples);
+            int numsamples = vorbis_synthesis_pcmout(&m_vorbisdsp, &samples);
+            vorbis_synthesis_read(&m_vorbisdsp, numsamples);
 
             // Push all samples into outbuffer
             outbuffer = reinterpret_cast<float*>(realloc(outbuffer, (outlen + numsamples * 2) * sizeof(float)));
-            if(1 == self->m_channels)
+            if(1 == m_channels)
             {
                 for(int i = 0; i < numsamples; ++i)
                 {
@@ -159,13 +169,6 @@ Handle<v8::Value> OggVorbisDecoder::decode(const Arguments &p_args)
         }
     }
 
-    // Build output buffer
-    node::Buffer *sbuf = node::Buffer::New(reinterpret_cast<const char*>(outbuffer), outlen * sizeof(float));
-    free(outbuffer);
-
-    Local<Function> nodeBufferConstructor = Local<Function>::Cast(Context::GetCurrent()->Global()->Get(v8::String::New("Buffer")));
-    Handle<Value> argv[3] = { sbuf->handle_, Integer::New(outlen * sizeof(float)), Integer::New(0) };
-    Local<Object> buf = nodeBufferConstructor->NewInstance(3, argv);
-
-    return scope.Close(buf);
+    *p_samples = outbuffer;
+    *p_sampleslen = outlen * sizeof(float);
 }
