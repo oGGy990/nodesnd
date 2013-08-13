@@ -35,6 +35,7 @@ AudioFrame::AudioFrame(const AudioFrame &p_other) :
 
 AudioFrame::~AudioFrame()
 {
+    m_buffer.Dispose();
 }
 
 float *AudioFrame::samples() const

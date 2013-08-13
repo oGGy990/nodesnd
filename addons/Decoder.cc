@@ -45,12 +45,14 @@ void Decoder::finishProcessing()
 
         while(!m_in.empty())
         {
+            m_in.front()->buffer.Dispose();
             delete m_in.front();
             m_in.pop();
         }
 
         while(!m_out.empty())
         {
+            m_out.front()->buffer.Dispose();
             delete m_out.front()->samples;
             delete m_out.front();
             m_out.pop();
@@ -201,6 +203,7 @@ void Decoder::outSignaller(uv_async_t *p_async, int p_status)
 
         AudioFrame *frame = AudioFrame::New(out->channels, out->samplerate, out->samples, out->sampleslen);
 
+        out->buffer.Dispose();
         delete out;
 
         // Emit frame event

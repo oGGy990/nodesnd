@@ -45,12 +45,14 @@ void Encoder::finishProcessing()
 
         while(!m_in.empty())
         {
+            m_in.front()->frame.Dispose();
             delete m_in.front();
             m_in.pop();
         }
 
         while(!m_out.empty())
         {
+            m_out.front()->frame.Dispose();
             delete m_out.front()->bufferdata;
             delete m_out.front();
             m_out.pop();
@@ -272,6 +274,7 @@ void Encoder::outSignaller(uv_async_t *p_async, int p_status)
         uv_mutex_unlock(&self->m_outLock);
 
         Buffer *sbuf = Buffer::New(reinterpret_cast<const char*>(out->bufferdata), out->bufferlen);
+        out->frame.Dispose();
         delete out->bufferdata;
         delete out;
 
