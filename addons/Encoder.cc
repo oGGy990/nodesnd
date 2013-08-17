@@ -24,7 +24,7 @@ Encoder::Encoder(int p_channels, int p_samplerate, int p_bitrate) :
     m_outSignal.data = this;
 
     uv_async_init(uv_default_loop(), &m_errorSignal, errorSignaller);
-    m_outSignal.data = this;
+    m_errorSignal.data = this;
 }
 
 Encoder::~Encoder()
@@ -308,7 +308,7 @@ void Encoder::outSignaller(uv_async_t *p_async, int p_status)
         {
             Local<Object> buf = Buffer::Use(reinterpret_cast<char*>(iter->data), iter->length);
 
-            // Emit frame event
+            // Emit data event
             Handle<Value> args[2] = {
                 String::New("data"),
                 buf
