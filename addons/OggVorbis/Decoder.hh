@@ -14,10 +14,10 @@ public:
 private:
     OggVorbisDecoder();
 
-    virtual void decode(unsigned char *p_data, unsigned int p_len, float **p_samples, unsigned int *p_sampleslen);
+    virtual void decode(unsigned char *p_data, unsigned int p_len);
 
-    static v8::Handle<v8::Value> New(const v8::Arguments &p_args);
-    static v8::Handle<v8::Value> Types(const v8::Arguments &p_args);
+    static void New(const v8::FunctionCallbackInfo<v8::Value> &p_args);
+    static void Types(const v8::FunctionCallbackInfo<v8::Value> &p_args);
 
     ogg_sync_state      m_oggsync;
     ogg_stream_state    m_oggstream;
@@ -31,9 +31,7 @@ private:
     vorbis_block        m_vorbisblock;
 
     int                 m_numpackets;
-    int                 m_channels;
     int                 m_bitrate;
-    int                 m_rate;
     int                 m_initialized;
 };
 

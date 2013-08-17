@@ -1,6 +1,7 @@
 #include "Decoder.hh"
 #include "AudioFrame.hh"
 #include <node_internals.h>
+#include <iostream>
 
 using namespace v8;
 using namespace node;
@@ -13,11 +14,15 @@ Decoder::Decoder() :
 {
     uv_mutex_init(&m_inLock);
     uv_mutex_init(&m_outLock);
+    uv_mutex_init(&m_errorLock);
 
     uv_cond_init(&m_inCondition);
 
     uv_async_init(uv_default_loop(), &m_outSignal, outSignaller);
     m_outSignal.data = this;
+
+    uv_async_init(uv_default_loop(), &m_errorSignal, errorSignaller);
+    m_errorSignal.data = this;
 
     uv_thread_create(&m_thread, threadRunner, this);
 }
@@ -26,8 +31,12 @@ Decoder::~Decoder()
 {
     finishProcessing();
 
+    uv_close(reinterpret_cast<uv_handle_t*>(&m_errorSignal), 0);
     uv_close(reinterpret_cast<uv_handle_t*>(&m_outSignal), 0);
+
     uv_cond_destroy(&m_inCondition);
+
+    uv_mutex_destroy(&m_errorLock);
     uv_mutex_destroy(&m_outLock);
     uv_mutex_destroy(&m_inLock);
 }
@@ -52,17 +61,50 @@ void Decoder::finishProcessing()
 
         while(!m_out.empty())
         {
-            m_out.front()->buffer.Dispose();
-            delete m_out.front()->samples;
-            delete m_out.front();
+            DecodeTask *task = m_out.front();
             m_out.pop();
+
+            std::list<DecodeOutput>::const_iterator iter;
+            for(iter = task->out.begin(); iter != task->out.end(); ++iter)
+            {
+                delete[] iter->samples;
+            }
+
+            task->buffer.Dispose();
+            delete task;
         }
     }
 }
 
-void Decoder::decode(unsigned char *p_data, unsigned int p_len, float **p_samples, unsigned int *p_sampleslen)
+void Decoder::decode(unsigned char *p_data, unsigned int p_len)
 {
-    fprintf(stderr, "Decoder::decode(): IMPLEMENT ME!\n");
+    std::cerr << "Decoder::decode(): IMPLEMENT ME!" << std::endl;
+}
+
+void Decoder::pushSamples(float *p_samples, unsigned int p_num)
+{
+    if(!p_samples || !p_num)
+        return;
+
+    DecodeOutput out;
+    out.channels = m_channels;
+    out.samplerate = m_samplerate;
+    out.samples = p_samples;
+    out.numsamples = p_num;
+
+    // Only called from decode thread while task
+    // is detached from main thread, so there's no
+    // need to protect this action.
+    m_task->out.push_back(out);
+}
+
+void Decoder::emitError(const std::string &p_err)
+{
+    uv_mutex_lock(&m_errorLock);
+    m_errors.push(p_err);
+    uv_mutex_unlock(&m_errorLock);
+
+    uv_async_send(&m_errorSignal);
 }
 
 Local<FunctionTemplate> Decoder::Template()
@@ -73,8 +115,6 @@ Local<FunctionTemplate> Decoder::Template()
 
     NODE_SET_PROTOTYPE_METHOD(tpl, "decode", Decode);
 
-    NODE_SET_METHOD(tpl->GetFunction(), "types", Types);
-
     return tpl;
 }
 
@@ -82,23 +122,23 @@ void Decoder::Initialize(Handle<Object> p_exports)
 {
     Local<FunctionTemplate> tpl = Template();
 
-    Persistent<Function> constructor = Persistent<Function>::New(tpl->GetFunction());
-    p_exports->Set(String::NewSymbol("Decoder"), constructor);
+    Persistent<Function> constructor(Isolate::GetCurrent(), tpl->GetFunction());
+    p_exports->Set(String::NewSymbol("Decoder"), tpl->GetFunction());
 }
 
-Handle<Value> Decoder::New(const Arguments &p_args)
+void Decoder::New(const v8::FunctionCallbackInfo<v8::Value> &p_args)
 {
-    HandleScope scope;
+    HandleScope scope(p_args.GetIsolate());
 
     Decoder *obj = new Decoder();
     obj->Wrap(p_args.This());
 
-    return p_args.This();
+    p_args.GetReturnValue().Set(p_args.This());
 }
 
-Handle<Value> Decoder::Decode(const Arguments &p_args)
+void Decoder::Decode(const v8::FunctionCallbackInfo<v8::Value> &p_args)
 {
-    HandleScope scope;
+    HandleScope scope(p_args.GetIsolate());
 
     if(1 < p_args.Length() || !p_args[0]->IsObject())
     {
@@ -109,9 +149,17 @@ Handle<Value> Decoder::Decode(const Arguments &p_args)
     Decoder *self = node::ObjectWrap::Unwrap<Decoder>(p_args.This());
 
     DecodeTask *task = new DecodeTask();
-    task->buffer = Persistent<Object>::New(p_args[0]->ToObject());
+    task->buffer.Reset(p_args.GetIsolate(), p_args[0]->ToObject());
     task->bufferdata = reinterpret_cast<unsigned char*>(Buffer::Data(p_args[0]->ToObject()));
     task->bufferlen = Buffer::Length(p_args[0]->ToObject());
+
+    if(!task->bufferdata || !task->bufferlen)
+    {
+        task->buffer.Dispose();
+        delete task;
+
+        return;
+    }
 
     uv_mutex_lock(&self->m_inLock);
 
@@ -119,17 +167,13 @@ Handle<Value> Decoder::Decode(const Arguments &p_args)
     uv_cond_signal(&self->m_inCondition);
 
     uv_mutex_unlock(&self->m_inLock);
-
-    return scope.Close(Undefined());
 }
 
-Handle<Value> Decoder::Types(const Arguments &p_args)
+void Decoder::Types(const v8::FunctionCallbackInfo<v8::Value> &p_args)
 {
-    static Persistent<Array> myTypes = Persistent<Array>::New(Array::New(0));
+    HandleScope scope(p_args.GetIsolate());
 
-    HandleScope scope;
-
-    return scope.Close(myTypes);
+    p_args.GetReturnValue().Set(Array::New(0));
 }
 
 void Decoder::threadRunner(void *p_data)
@@ -154,26 +198,21 @@ void Decoder::threadRunner(void *p_data)
             }
         }
 
-        DecodeTask *task = self->m_in.front();
+        self->m_task = self->m_in.front();
         self->m_in.pop();
 
         uv_mutex_unlock(&self->m_inLock);
 
         // Decode input chunk
         self->decode(
-            task->bufferdata,
-            task->bufferlen,
-            &task->samples,
-            &task->sampleslen
+            self->m_task->bufferdata,
+            self->m_task->bufferlen
         );
-
-        task->channels = self->m_channels;
-        task->samplerate = self->m_samplerate;
 
         // Push decoded samples
         uv_mutex_lock(&self->m_outLock);
 
-        self->m_out.push(task);
+        self->m_out.push(self->m_task);
 
         uv_mutex_unlock(&self->m_outLock);
 
@@ -185,7 +224,7 @@ void Decoder::outSignaller(uv_async_t *p_async, int p_status)
 {
     Decoder *self = reinterpret_cast<Decoder*>(p_async->data);
 
-    HandleScope scope;
+    HandleScope scope(Isolate::GetCurrent());
 
     uv_mutex_lock(&self->m_outLock);
     while(!self->m_out.empty())
@@ -193,28 +232,62 @@ void Decoder::outSignaller(uv_async_t *p_async, int p_status)
         DecodeTask *out = self->m_out.front();
         self->m_out.pop();
 
-        if(!out->samples)
-        {
-            delete out;
-            continue;
-        }
-
         uv_mutex_unlock(&self->m_outLock);
 
-        AudioFrame *frame = AudioFrame::New(out->channels, out->samplerate, out->samples, out->sampleslen);
+        std::list<DecodeOutput>::const_iterator iter;
+        for(iter = out->out.begin(); iter != out->out.end(); ++iter)
+        {
+            // Takes ownership of samples
+            AudioFrame *frame = AudioFrame::New(
+                iter->channels,
+                iter->samplerate,
+                iter->samples,
+                iter->numsamples * sizeof(float)
+            );
+
+            if(!frame)
+                continue;
+
+            // Emit frame event
+            Handle<Value> args[2] = {
+                String::New("frame"),
+                frame->handle()
+            };
+
+            MakeCallback(self->handle(), "emit", 2, args);
+        }
 
         out->buffer.Dispose();
         delete out;
 
-        // Emit frame event
-        Handle<Value> args[2] = {
-            String::New("frame"),
-            frame->handle_
-        };
-
-        MakeCallback(self->handle_, "emit", 2, args);
-
         uv_mutex_lock(&self->m_outLock);
     }
     uv_mutex_unlock(&self->m_outLock);
+}
+
+void Decoder::errorSignaller(uv_async_t *p_async, int p_status)
+{
+    Decoder *self = reinterpret_cast<Decoder*>(p_async->data);
+
+    HandleScope scope(Isolate::GetCurrent());
+
+    uv_mutex_lock(&self->m_errorLock);
+    while(!self->m_errors.empty())
+    {
+        std::string err = self->m_errors.front();
+        self->m_errors.pop();
+
+        uv_mutex_unlock(&self->m_errorLock);
+
+        // Emit error event
+        Handle<Value> args[2] = {
+            String::New("error"),
+            String::New(err.c_str())
+        };
+
+        MakeCallback(self->handle(), "emit", 2, args);
+
+        uv_mutex_lock(&self->m_errorLock);
+    }
+    uv_mutex_unlock(&self->m_errorLock);
 }

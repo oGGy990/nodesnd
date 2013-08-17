@@ -86,18 +86,18 @@ void OggVorbisEncoder::Initialize(Handle<Object> p_exports)
     tpl->Inherit(Template());
 
     tpl->PrototypeTemplate()->Set(
-            String::NewSymbol("type"),
-            String::New("application/ogg"),
-            static_cast<v8::PropertyAttribute>(v8::ReadOnly | v8::DontDelete)
-        );
+        String::NewSymbol("type"),
+        String::New("application/ogg"),
+        static_cast<PropertyAttribute>(v8::ReadOnly | v8::DontDelete)
+    );
 
-    Persistent<Function> constructor = Persistent<Function>::New(tpl->GetFunction());
-    p_exports->Set(String::NewSymbol("OggVorbisEncoder"), constructor);
+    Persistent<Function> constructor(Isolate::GetCurrent(), tpl->GetFunction());
+    p_exports->Set(String::NewSymbol("OggVorbisEncoder"), tpl->GetFunction());
 }
 
-Handle<Value> OggVorbisEncoder::New(const Arguments &p_args)
+void OggVorbisEncoder::New(const v8::FunctionCallbackInfo<Value> &p_args)
 {
-    HandleScope scope;
+    HandleScope scope(p_args.GetIsolate());
 
     int channels = p_args[0]->Int32Value();
     int samplerate = p_args[1]->Int32Value();
@@ -106,18 +106,13 @@ Handle<Value> OggVorbisEncoder::New(const Arguments &p_args)
     OggVorbisEncoder *obj = new OggVorbisEncoder(channels, samplerate, bitrate);
     obj->Wrap(p_args.This());
 
-    return p_args.This();
+    p_args.GetReturnValue().Set(p_args.This());
 }
 
-void OggVorbisEncoder::encode(float *p_samples, unsigned int p_sampleslen, unsigned char **p_data, unsigned int *p_len)
+void OggVorbisEncoder::encode(float *p_samples, unsigned int p_numsamples)
 {
-    p_sampleslen /= sizeof(float);
-
     if(!m_initialized)
         return;
-
-    unsigned char *outbuffer = 0;
-    unsigned int outlen = 0;
 
     // Write headers
     if(!m_headers)
@@ -131,11 +126,11 @@ void OggVorbisEncoder::encode(float *p_samples, unsigned int p_sampleslen, unsig
 
         while(ogg_stream_flush(&m_oggsstate, &m_oggpage) > 0)
         {
-            outbuffer = reinterpret_cast<unsigned char*>(realloc(outbuffer, outlen + m_oggpage.header_len + m_oggpage.body_len));
-            memcpy(outbuffer + outlen, m_oggpage.header, m_oggpage.header_len);
-            memcpy(outbuffer + outlen + m_oggpage.header_len, m_oggpage.body, m_oggpage.body_len);
+            unsigned char *outbuffer = new unsigned char[m_oggpage.header_len + m_oggpage.body_len];
+            memcpy(outbuffer, m_oggpage.header, m_oggpage.header_len);
+            memcpy(outbuffer + m_oggpage.header_len, m_oggpage.body, m_oggpage.body_len);
 
-            outlen += m_oggpage.header_len + m_oggpage.body_len;
+            pushFrame(outbuffer, m_oggpage.header_len + m_oggpage.body_len);
         }
 
         m_headers = true;
@@ -143,7 +138,7 @@ void OggVorbisEncoder::encode(float *p_samples, unsigned int p_sampleslen, unsig
     else // Encode
     {
         // Feed the samples to the encoder
-        long num_samples = p_sampleslen / channels();
+        long num_samples = p_numsamples / channels();
         float **buffer = vorbis_analysis_buffer(&m_vorbisdsp, num_samples);
         for(int ch = 0; ch < channels(); ch++)
         {
@@ -184,17 +179,14 @@ void OggVorbisEncoder::encode(float *p_samples, unsigned int p_sampleslen, unsig
             m_samples_in_page -= ogg_page_granulepos(&m_oggpage) - m_samples_last_page;
             m_samples_last_page = ogg_page_granulepos(&m_oggpage);
 
-            outbuffer = reinterpret_cast<unsigned char*>(realloc(outbuffer, outlen + m_oggpage.header_len + m_oggpage.body_len));
-            memcpy(outbuffer + outlen, m_oggpage.header, m_oggpage.header_len);
-            memcpy(outbuffer + outlen + m_oggpage.header_len, m_oggpage.body, m_oggpage.body_len);
+            unsigned char *outbuffer = new unsigned char[m_oggpage.header_len + m_oggpage.body_len];
+            memcpy(outbuffer, m_oggpage.header, m_oggpage.header_len);
+            memcpy(outbuffer + m_oggpage.header_len, m_oggpage.body, m_oggpage.body_len);
 
-            outlen += m_oggpage.header_len + m_oggpage.body_len;
+            pushFrame(outbuffer, m_oggpage.header_len + m_oggpage.body_len);
 
             if(ogg_page_eos(&m_oggpage))
                 eos = 1;
         }
     }
-
-    *p_data = outbuffer;
-    *p_len = outlen;
 }

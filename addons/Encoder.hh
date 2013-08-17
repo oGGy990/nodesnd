@@ -2,8 +2,9 @@
 #define ENCODER_HH
 
 #include <node.h>
-#include <node_buffer.h>
 #include <queue>
+#include <list>
+#include <string>
 
 class AudioFrame;
 
@@ -28,20 +29,24 @@ protected:
     // Called on a different thread
     virtual bool init();
     virtual void finish();
-    virtual void encode(float *p_samples, unsigned int p_sampleslen, unsigned char **p_data, unsigned int *p_len);
+    virtual void encode(float *p_samples, unsigned int p_sampleslen);
+
+    void pushFrame(unsigned char *p_data, unsigned int p_len);
+    void emitError(const std::string &p_err);
 
 private:
-    static v8::Handle<v8::Value> New(const v8::Arguments &p_args);
-    static v8::Handle<v8::Value> Init(const v8::Arguments &p_args);
-    static v8::Handle<v8::Value> Finish(const v8::Arguments &p_args);
-    static v8::Handle<v8::Value> Encode(const v8::Arguments &p_args);
+    static void New(const v8::FunctionCallbackInfo<v8::Value> &p_args);
+    static void Init(const v8::FunctionCallbackInfo<v8::Value> &p_args);
+    static void Finish(const v8::FunctionCallbackInfo<v8::Value> &p_args);
+    static void Encode(const v8::FunctionCallbackInfo<v8::Value> &p_args);
 
-    static v8::Handle<v8::Value> ChannelsGetter(v8::Local<v8::String> p_property, const v8::AccessorInfo &p_info);
-    static v8::Handle<v8::Value> SamplerateGetter(v8::Local<v8::String> p_property, const v8::AccessorInfo &p_info);
-    static v8::Handle<v8::Value> BitrateGetter(v8::Local<v8::String> p_property, const v8::AccessorInfo &p_info);
+    static void ChannelsGetter(v8::Local<v8::String> p_property, const v8::PropertyCallbackInfo<v8::Value> &p_info);
+    static void SamplerateGetter(v8::Local<v8::String> p_property, const v8::PropertyCallbackInfo<v8::Value> &p_info);
+    static void BitrateGetter(v8::Local<v8::String> p_property, const v8::PropertyCallbackInfo<v8::Value> &p_info);
 
     static void threadRunner(void *p_data);
     static void outSignaller(uv_async_t *p_async, int p_status);
+    static void errorSignaller(uv_async_t *p_async, int p_status);
 
     int m_channels;
     int m_samplerate;
@@ -49,30 +54,46 @@ private:
 
     bool m_endThread;
 
+    struct EncodeOutput
+    {
+        EncodeOutput() :
+            data(0), length(0)
+        {}
+
+        unsigned char *data;
+        unsigned int length;
+    };
+
     struct EncodeTask
     {
         EncodeTask() :
-            samples(0), sampleslen(0),
-            bufferdata(0), bufferlen(0)
+            samples(0), numsamples(0)
         {}
 
         // Input
         v8::Persistent<v8::Object> frame;
         float *samples;
-        unsigned int sampleslen;
+        unsigned int numsamples;
 
         // Output
-        unsigned char *bufferdata;
-        unsigned int bufferlen;
+        std::list<EncodeOutput> out;
     };
     std::queue<EncodeTask*> m_in;
     std::queue<EncodeTask*> m_out;
+    EncodeTask *m_task;
+
+    std::queue<std::string> m_errors;
 
     uv_thread_t m_thread;
+
     uv_mutex_t m_inLock;
-    uv_mutex_t m_outLock;
     uv_cond_t m_inCondition;
+
+    uv_mutex_t m_outLock;
     uv_async_t m_outSignal;
+
+    uv_mutex_t m_errorLock;
+    uv_async_t m_errorSignal;
 };
 
 #endif // ENCODER_HH

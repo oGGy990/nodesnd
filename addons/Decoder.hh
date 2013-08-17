@@ -2,8 +2,9 @@
 #define DECODER_HH
 
 #include <node.h>
-#include <node_buffer.h>
+#include <list>
 #include <queue>
+#include <string>
 
 class AudioFrame;
 
@@ -28,26 +29,43 @@ protected:
     void setSamplerate(int p_rate) { m_samplerate = p_rate; }
 
     // Called on a different thread
-    virtual void decode(unsigned char *p_data, unsigned int p_len, float **p_samples, unsigned int *p_sampleslen);
+    virtual void decode(unsigned char *p_data, unsigned int p_len);
+
+    // To be called by decode method for each decoded frame
+    void pushSamples(float *p_samples, unsigned int p_num);
+    void emitError(const std::string &p_err);
 
 private:
-    static v8::Handle<v8::Value> New(const v8::Arguments &p_args);
-    static v8::Handle<v8::Value> Decode(const v8::Arguments &p_args);
-    static v8::Handle<v8::Value> Types(const v8::Arguments &p_args);
+    static void New(const v8::FunctionCallbackInfo<v8::Value> &p_args);
+    static void Decode(const v8::FunctionCallbackInfo<v8::Value> &p_args);
+    static void Types(const v8::FunctionCallbackInfo<v8::Value> &p_args);
 
     static void threadRunner(void *p_data);
     static void outSignaller(uv_async_t *p_async, int p_status);
+    static void errorSignaller(uv_async_t *p_async, int p_status);
 
     int m_channels;
     int m_samplerate;
 
     bool m_endThread;
 
+    struct DecodeOutput
+    {
+        DecodeOutput() :
+            channels(0), samplerate(0),
+            samples(0), numsamples(0)
+        {}
+
+        int channels;
+        int samplerate;
+        float *samples;
+        unsigned int numsamples;
+    };
+
     struct DecodeTask
     {
         DecodeTask() :
-            bufferdata(0), bufferlen(0),
-            channels(0), samplerate(0), samples(0)
+            bufferdata(0), bufferlen(0)
         {}
 
         // Input
@@ -56,19 +74,24 @@ private:
         unsigned int bufferlen;
 
         // Output
-        int channels;
-        int samplerate;
-        float *samples;
-        unsigned int sampleslen;
+        std::list<DecodeOutput> out;
     };
     std::queue<DecodeTask*> m_in;
     std::queue<DecodeTask*> m_out;
+    DecodeTask *m_task;
+
+    std::queue<std::string> m_errors;
 
     uv_thread_t m_thread;
+
     uv_mutex_t m_inLock;
-    uv_mutex_t m_outLock;
     uv_cond_t m_inCondition;
+
+    uv_mutex_t m_outLock;
     uv_async_t m_outSignal;
+
+    uv_mutex_t m_errorLock;
+    uv_async_t m_errorSignal;
 };
 
 #endif // DECODER_HH

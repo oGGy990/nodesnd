@@ -15,12 +15,12 @@ protected:
     virtual bool init();
     virtual void finish();
 
-    virtual void encode(float *p_samples, unsigned int p_sampleslen, unsigned char **p_data, unsigned int *p_len);
+    virtual void encode(float *p_samples, unsigned int p_numsamples);
 
 private:
     OggVorbisEncoder(int p_channels, int p_samplerate, int p_bitrate);
 
-    static v8::Handle<v8::Value> New(const v8::Arguments &p_args);
+    static void New(const v8::FunctionCallbackInfo<v8::Value> &p_args);
 
     ogg_stream_state    m_oggsstate;
     ogg_page            m_oggpage;

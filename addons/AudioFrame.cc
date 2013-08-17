@@ -1,18 +1,17 @@
 #include "AudioFrame.hh"
 #include "node_buffer.h"
 #include "node_internals.h"
-#include <cstdlib>
 
 using namespace v8;
 using namespace node;
 
-Persistent<FunctionTemplate> AudioFrame::m_constructorTemplate;
+Persistent<Function> AudioFrame::m_constructorTemplate;
 
 AudioFrame::AudioFrame(int p_channels, int p_samplerate, Local<Object> p_buffer) :
     ObjectWrap(),
     m_channels(p_channels),
     m_samplerate(p_samplerate),
-    m_buffer(Persistent<Object>::New(p_buffer))
+    m_buffer(Isolate::GetCurrent(), p_buffer)
 {
 }
 
@@ -23,14 +22,8 @@ AudioFrame::AudioFrame(const AudioFrame &p_other) :
 {
     HandleScope scope;
 
-    Buffer *sbuf = Buffer::New(reinterpret_cast<const char*>(p_other.samples()), p_other.numSamples() * sizeof(float));
-
-    // Create fast buffer
-    Local<Function> nodeBufferConstructor = Local<Function>::Cast(Context::GetCurrent()->Global()->Get(String::New("Buffer")));
-    Handle<Value> bufargv[3] = { sbuf->handle_, Integer::New(p_other.numSamples() * sizeof(float)), Integer::New(0) };
-    Local<Object> buf = nodeBufferConstructor->NewInstance(3, bufargv);
-
-    m_buffer = Persistent<Object>::New(buf);
+    Local<Object> buf = Buffer::New(reinterpret_cast<char*>(p_other.samples()), p_other.numSamples() * sizeof(float));
+    m_buffer.Reset(Isolate::GetCurrent(), buf);
 }
 
 AudioFrame::~AudioFrame()
@@ -40,50 +33,50 @@ AudioFrame::~AudioFrame()
 
 float *AudioFrame::samples() const
 {
-    return reinterpret_cast<float*>(Buffer::Data(m_buffer));
+    return reinterpret_cast<float*>(Buffer::Data(const_cast<AudioFrame*>(this)->m_buffer));
 }
 
 unsigned int AudioFrame::numSamples() const
 {
-    return Buffer::Length(m_buffer) / sizeof(float);
+    return Buffer::Length(const_cast<AudioFrame*>(this)->m_buffer) / sizeof(float);
 }
 
 void AudioFrame::Initialize(v8::Handle<v8::Object> p_exports)
 {
     Local<FunctionTemplate> t = FunctionTemplate::New(New);
-    m_constructorTemplate = Persistent<FunctionTemplate>::New(t);
-    m_constructorTemplate->SetClassName(String::NewSymbol("AudioFrame"));
-    m_constructorTemplate->InstanceTemplate()->SetInternalFieldCount(1);
+    t->SetClassName(String::NewSymbol("AudioFrame"));
+    t->InstanceTemplate()->SetInternalFieldCount(1);
 
-    m_constructorTemplate->InstanceTemplate()->SetAccessor(String::NewSymbol("channels"), ChannelsGetter, 0);
-    m_constructorTemplate->InstanceTemplate()->SetAccessor(String::NewSymbol("samplerate"), SamplerateGetter, 0);
-    m_constructorTemplate->InstanceTemplate()->SetAccessor(String::NewSymbol("data"), DataGetter, 0);
+    t->InstanceTemplate()->SetAccessor(String::NewSymbol("channels"), ChannelsGetter, 0);
+    t->InstanceTemplate()->SetAccessor(String::NewSymbol("samplerate"), SamplerateGetter, 0);
+    t->InstanceTemplate()->SetAccessor(String::NewSymbol("data"), DataGetter, 0);
 
-    p_exports->Set(String::NewSymbol("AudioFrame"), m_constructorTemplate->GetFunction());
+    p_exports->Set(String::NewSymbol("AudioFrame"), t->GetFunction());
+
+    m_constructorTemplate.Reset(Isolate::GetCurrent(), t->GetFunction());
 }
 
 AudioFrame *AudioFrame::New(int p_channels, int p_samplerate, float *p_samples, unsigned int p_samplelen)
 {
-    HandleScope scope;
+    HandleScope scope(Isolate::GetCurrent());
 
-    Buffer *sbuf = Buffer::New(reinterpret_cast<const char*>(p_samples), p_samplelen);
-    free(p_samples);
-
-    // Create fast buffer
-    Local<Function> nodeBufferConstructor = Local<Function>::Cast(Context::GetCurrent()->Global()->Get(String::New("Buffer")));
-    Handle<Value> bufargv[3] = { sbuf->handle_, Integer::New(p_samplelen), Integer::New(0) };
-    Local<Object> buf = nodeBufferConstructor->NewInstance(3, bufargv);
+    Local<Object> buf = Buffer::Use(reinterpret_cast<char*>(p_samples), p_samplelen);
 
     // Call constructor
-    Handle<Value> constargv[3] = { Integer::New(p_channels), Integer::New(p_samplerate), buf };
-    Local<Object> obj = m_constructorTemplate->GetFunction()->NewInstance(3, constargv);
+    Handle<Value> constargv[3] = {
+        Integer::New(p_channels, Isolate::GetCurrent()),
+        Integer::New(p_samplerate, Isolate::GetCurrent()),
+        buf
+    };
+    Local<Function> constr = Local<Function>::New(Isolate::GetCurrent(), m_constructorTemplate);
+    Local<Object> obj = constr->NewInstance(3, constargv);
 
     return ObjectWrap::Unwrap<AudioFrame>(obj);
 }
 
-Handle<Value> AudioFrame::New(const Arguments &p_args)
+void AudioFrame::New(const v8::FunctionCallbackInfo<Value>& p_args)
 {
-    HandleScope scope;
+    HandleScope scope(Isolate::GetCurrent());
 
     if(p_args.Length() < 1)
     {
@@ -124,23 +117,23 @@ Handle<Value> AudioFrame::New(const Arguments &p_args)
         return ThrowRangeError("Bad number of arguments");
     }
 
-    return p_args.This();
+    return p_args.GetReturnValue().Set(p_args.This());
 }
 
-Handle<Value> AudioFrame::ChannelsGetter(Local<String> p_property, const AccessorInfo &p_info)
+void AudioFrame::ChannelsGetter(Local<String> p_property, const PropertyCallbackInfo<Value> &p_info)
 {
     AudioFrame *self = ObjectWrap::Unwrap<AudioFrame>(p_info.Holder());
-    return Integer::New(self->m_channels);
+    return p_info.GetReturnValue().Set(Integer::New(self->m_channels, p_info.GetIsolate()));
 }
 
-Handle<Value> AudioFrame::SamplerateGetter(Local<String> p_property, const AccessorInfo &p_info)
+void AudioFrame::SamplerateGetter(Local<String> p_property, const PropertyCallbackInfo<Value> &p_info)
 {
     AudioFrame *self = ObjectWrap::Unwrap<AudioFrame>(p_info.Holder());
-    return Integer::New(self->m_samplerate);
+    return p_info.GetReturnValue().Set(Integer::New(self->m_samplerate, p_info.GetIsolate()));
 }
 
-Handle<Value> AudioFrame::DataGetter(Local<String> p_property, const AccessorInfo &p_info)
+void AudioFrame::DataGetter(Local<String> p_property, const PropertyCallbackInfo<Value> &p_info)
 {
     AudioFrame *self = ObjectWrap::Unwrap<AudioFrame>(p_info.Holder());
-    return self->m_buffer;
+    return p_info.GetReturnValue().Set(self->m_buffer);
 }

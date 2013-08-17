@@ -1,7 +1,7 @@
 #include "Decoder.hh"
 #include <node_buffer.h>
 #include <cstring>
-#include <cstdlib>
+#include <sstream>
 
 using namespace v8;
 
@@ -9,9 +9,7 @@ OggVorbisDecoder::OggVorbisDecoder() :
     Decoder(),
     m_serialno(-1),
     m_numpackets(0),
-    m_channels(0),
     m_bitrate(0),
-    m_rate(0),
     m_initialized(0)
 {
     ogg_sync_init(&m_oggsync);
@@ -46,37 +44,36 @@ void OggVorbisDecoder::Initialize(Handle<Object> p_exports)
 
     tpl->Inherit(Template());
 
-    NODE_SET_METHOD(tpl->GetFunction(), "types", Types);
+    Local<Function> func = tpl->GetFunction();
 
-    Persistent<Function> constructor = Persistent<Function>::New(tpl->GetFunction());
-    p_exports->Set(String::NewSymbol("OggVorbisDecoder"), constructor);
+    NODE_SET_METHOD(func, "types", Types);
+
+    Persistent<Function> constructor(Isolate::GetCurrent(), func);
+    p_exports->Set(String::NewSymbol("OggVorbisDecoder"), func);
 }
 
-Handle<Value> OggVorbisDecoder::New(const Arguments &p_args)
+void OggVorbisDecoder::New(const v8::FunctionCallbackInfo<Value> &p_args)
 {
-    HandleScope scope;
+    HandleScope scope(p_args.GetIsolate());
 
     OggVorbisDecoder *obj = new OggVorbisDecoder();
     obj->Wrap(p_args.This());
 
-    return p_args.This();
+    p_args.GetReturnValue().Set(p_args.This());
 }
 
-Handle<Value> OggVorbisDecoder::Types(const Arguments &p_args)
+void OggVorbisDecoder::Types(const v8::FunctionCallbackInfo<Value> &p_args)
 {
-    HandleScope scope;
+    HandleScope scope(p_args.GetIsolate());
 
     Local<Array> myTypes = Array::New(1);
     myTypes->Set(0, String::New("application/ogg"));
 
-    return scope.Close(myTypes);
+    p_args.GetReturnValue().Set(myTypes);
 }
 
-void OggVorbisDecoder::decode(unsigned char *p_data, unsigned int p_len, float **p_samples, unsigned int *p_sampleslen)
+void OggVorbisDecoder::decode(unsigned char *p_data, unsigned int p_len)
 {
-    float *outbuffer = 0;
-    unsigned int outlen = 0;
-
     // Decode input
     char *syncbuffer = ogg_sync_buffer(&m_oggsync, p_len);
     memcpy(syncbuffer, p_data, p_len);
@@ -101,9 +98,7 @@ void OggVorbisDecoder::decode(unsigned char *p_data, unsigned int p_len, float *
                 // Not a vorbis stream?
                 if(!vorbis_synthesis_idheader(&m_oggpacket))
                 {
-                    /*dLog->error("OGG/Vorbis", QString("OGG stream is no vorbis stream!"));
-                    stop();*/
-                    free(outbuffer);
+                    emitError("Ogg stream is no vorbis stream!");
                     return;
                 }
 
@@ -126,15 +121,9 @@ void OggVorbisDecoder::decode(unsigned char *p_data, unsigned int p_len, float *
                 vorbis_block_init(&m_vorbisdsp, &m_vorbisblock);
                 m_initialized = 3;
 
-                m_channels = m_vorbisinfo.channels;
-                m_rate = m_vorbisinfo.rate;
                 m_bitrate = m_vorbisinfo.bitrate_nominal;
                 setChannels(m_vorbisinfo.channels);
                 setSamplerate(m_vorbisinfo.rate);
-                /*emit newFormat(m_channels, m_rate);
-
-                dLog->info("OGG/Vorbis", QString("Stream ready: %1 Channels @ %2Hz, Bitrate %3kbps")
-                           .arg(m_channels).arg(m_rate).arg(m_bitrate));*/
             }
 
             // Synthesize current block
@@ -144,31 +133,40 @@ void OggVorbisDecoder::decode(unsigned char *p_data, unsigned int p_len, float *
             // Get all samples
             float **samples;
             int numsamples = vorbis_synthesis_pcmout(&m_vorbisdsp, &samples);
-            vorbis_synthesis_read(&m_vorbisdsp, numsamples);
+            if(numsamples > 0)
+            {
+                vorbis_synthesis_read(&m_vorbisdsp, numsamples);
 
-            // Push all samples into outbuffer
-            outbuffer = reinterpret_cast<float*>(realloc(outbuffer, (outlen + numsamples * 2) * sizeof(float)));
-            if(1 == m_channels)
-            {
-                for(int i = 0; i < numsamples; ++i)
+                // Push all samples into outbuffer
+                float *outbuffer = new float[numsamples * channels()];
+                unsigned int pos = 0;
+
+                if(2 == channels())
                 {
-                    outbuffer[outlen] = samples[0][i];
-                    outbuffer[outlen + 1] = samples[0][i];
-                    outlen += 2;
+                    for(int i = 0; i < numsamples; ++i)
+                    {
+                        outbuffer[pos] = samples[0][i];
+                        outbuffer[pos + 1] = samples[1][i];
+                        pos += 2;
+                    }
                 }
-            }
-            else
-            {
-                for(int i = 0; i < numsamples; ++i)
+                else if(1 == channels())
                 {
-                    outbuffer[outlen] = samples[0][i];
-                    outbuffer[outlen + 1] = samples[1][i];
-                    outlen += 2;
+                    memcpy(outbuffer, samples[0], numsamples * sizeof(float));
                 }
+                else
+                {
+                    for(int i = 0; i < numsamples; ++i)
+                    {
+                        for(int c = 0; c < channels(); ++c)
+                        {
+                            outbuffer[pos++] = samples[c][i];
+                        }
+                    }
+                }
+
+                pushSamples(outbuffer, numsamples * channels());
             }
         }
     }
-
-    *p_samples = outbuffer;
-    *p_sampleslen = outlen * sizeof(float);
 }

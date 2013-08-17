@@ -1,6 +1,8 @@
 #include "Encoder.hh"
 #include "AudioFrame.hh"
 #include <node_internals.h>
+#include <node_buffer.h>
+#include <iostream>
 
 using namespace v8;
 using namespace node;
@@ -14,10 +16,14 @@ Encoder::Encoder(int p_channels, int p_samplerate, int p_bitrate) :
 {
     uv_mutex_init(&m_inLock);
     uv_mutex_init(&m_outLock);
+    uv_mutex_init(&m_errorLock);
 
     uv_cond_init(&m_inCondition);
 
     uv_async_init(uv_default_loop(), &m_outSignal, outSignaller);
+    m_outSignal.data = this;
+
+    uv_async_init(uv_default_loop(), &m_errorSignal, errorSignaller);
     m_outSignal.data = this;
 }
 
@@ -26,8 +32,12 @@ Encoder::~Encoder()
     finishProcessing();
     finish();
 
+    uv_close(reinterpret_cast<uv_handle_t*>(&m_errorSignal), 0);
     uv_close(reinterpret_cast<uv_handle_t*>(&m_outSignal), 0);
+
     uv_cond_destroy(&m_inCondition);
+
+    uv_mutex_destroy(&m_errorLock);
     uv_mutex_destroy(&m_outLock);
     uv_mutex_destroy(&m_inLock);
 }
@@ -52,10 +62,16 @@ void Encoder::finishProcessing()
 
         while(!m_out.empty())
         {
-            m_out.front()->frame.Dispose();
-            delete m_out.front()->bufferdata;
-            delete m_out.front();
+            EncodeTask *task = m_out.front();
             m_out.pop();
+
+            task->frame.Dispose();
+
+            std::list<EncodeOutput>::const_iterator iter;
+            for(iter = task->out.begin(); iter != task->out.end(); ++iter)
+                delete[] iter->data;
+
+            delete task;
         }
     }
 }
@@ -69,9 +85,33 @@ void Encoder::finish()
 {
 }
 
-void Encoder::encode(float *p_samples, unsigned int p_sampleslen, unsigned char **p_data, unsigned int *p_len)
+void Encoder::encode(float *p_samples, unsigned int p_sampleslen)
 {
-    fprintf(stderr, "Encoder::encode(): IMPLEMENT ME!\n");
+    std::cerr << "Encoder::encode(): IMPLEMENT ME!" << std::endl;
+}
+
+void Encoder::pushFrame(unsigned char *p_data, unsigned int p_length)
+{
+    if(!p_data || !p_length)
+        return;
+
+    EncodeOutput out;
+    out.data = p_data;
+    out.length = p_length;
+
+    // Only called from encode thread while task
+    // is detached from main thread, so there's no
+    // need to protect this action.
+    m_task->out.push_back(out);
+}
+
+void Encoder::emitError(const std::string &p_err)
+{
+    uv_mutex_lock(&m_errorLock);
+    m_errors.push(p_err);
+    uv_mutex_unlock(&m_errorLock);
+
+    uv_async_send(&m_errorSignal);
 }
 
 Local<FunctionTemplate> Encoder::Template()
@@ -90,7 +130,7 @@ Local<FunctionTemplate> Encoder::Template()
 
     tpl->PrototypeTemplate()->Set(
         String::NewSymbol("type"),
-        String::New(""),
+        String::Empty(),
         static_cast<v8::PropertyAttribute>(v8::ReadOnly | v8::DontDelete)
     );
 
@@ -101,13 +141,13 @@ void Encoder::Initialize(Handle<Object> p_exports)
 {
     Local<FunctionTemplate> tpl = Template();
 
-    Persistent<Function> constructor = Persistent<Function>::New(tpl->GetFunction());
-    p_exports->Set(String::NewSymbol("Encoder"), constructor);
+    Persistent<Function> constructor(Isolate::GetCurrent(), tpl->GetFunction());
+    p_exports->Set(String::NewSymbol("Encoder"), tpl->GetFunction());
 }
 
-Handle<Value> Encoder::New(const Arguments &p_args)
+void Encoder::New(const v8::FunctionCallbackInfo<Value> &p_args)
 {
-    HandleScope scope;
+    HandleScope scope(p_args.GetIsolate());
 
     if(p_args.Length() < 3 ||
         !p_args[0]->IsNumber() ||
@@ -124,12 +164,12 @@ Handle<Value> Encoder::New(const Arguments &p_args)
     );
     obj->Wrap(p_args.This());
 
-    return p_args.This();
+    p_args.GetReturnValue().Set(p_args.This());
 }
 
-Handle<Value> Encoder::Init(const Arguments &p_args)
+void Encoder::Init(const v8::FunctionCallbackInfo<Value> &p_args)
 {
-    HandleScope scope;
+    HandleScope scope(p_args.GetIsolate());
 
     Encoder *self = ObjectWrap::Unwrap<Encoder>(p_args.This());
 
@@ -143,12 +183,12 @@ Handle<Value> Encoder::Init(const Arguments &p_args)
         uv_thread_create(&self->m_thread, threadRunner, self);
     }
 
-    return scope.Close(Boolean::New(ok));
+    p_args.GetReturnValue().Set(Boolean::New(ok));
 }
 
-Handle<Value> Encoder::Finish(const Arguments &p_args)
+void Encoder::Finish(const v8::FunctionCallbackInfo<Value> &p_args)
 {
-    HandleScope scope;
+    HandleScope scope(p_args.GetIsolate());
 
     Encoder *self = ObjectWrap::Unwrap<Encoder>(p_args.This());
 
@@ -157,13 +197,11 @@ Handle<Value> Encoder::Finish(const Arguments &p_args)
 
     // End subclass
     self->finish();
-
-    return scope.Close(Undefined());
 }
 
-Handle<Value> Encoder::Encode(const Arguments &p_args)
+void Encoder::Encode(const v8::FunctionCallbackInfo<Value> &p_args)
 {
-    HandleScope scope;
+    HandleScope scope(p_args.GetIsolate());
 
     if(1 < p_args.Length() || !p_args[0]->IsObject())
     {
@@ -175,9 +213,9 @@ Handle<Value> Encoder::Encode(const Arguments &p_args)
     AudioFrame *frame = ObjectWrap::Unwrap<AudioFrame>(p_args[0]->ToObject());
 
     EncodeTask *task = new EncodeTask();
-    task->frame = Persistent<Object>::New(p_args[0]->ToObject());
+    task->frame.Reset(p_args.GetIsolate(), p_args[0]->ToObject());
     task->samples = frame->samples();
-    task->sampleslen = frame->numSamples() * sizeof(float);
+    task->numsamples = frame->numSamples();
 
     uv_mutex_lock(&self->m_inLock);
 
@@ -185,26 +223,24 @@ Handle<Value> Encoder::Encode(const Arguments &p_args)
     uv_cond_signal(&self->m_inCondition);
 
     uv_mutex_unlock(&self->m_inLock);
-
-    return scope.Close(Undefined());
 }
 
-Handle<Value> Encoder::ChannelsGetter(Local<String> p_property, const AccessorInfo &p_info)
+void Encoder::ChannelsGetter(Local<String> p_property, const PropertyCallbackInfo<Value> &p_info)
 {
     Encoder *self = ObjectWrap::Unwrap<Encoder>(p_info.Holder());
-    return Integer::New(self->m_channels);
+    p_info.GetReturnValue().Set(Integer::New(self->m_channels, p_info.GetIsolate()));
 }
 
-Handle<Value> Encoder::SamplerateGetter(Local<String> p_property, const AccessorInfo &p_info)
+void Encoder::SamplerateGetter(Local<String> p_property, const PropertyCallbackInfo<Value> &p_info)
 {
     Encoder *self = ObjectWrap::Unwrap<Encoder>(p_info.Holder());
-    return Integer::New(self->m_samplerate);
+    p_info.GetReturnValue().Set(Integer::New(self->m_samplerate, p_info.GetIsolate()));
 }
 
-Handle<Value> Encoder::BitrateGetter(Local<String> p_property, const AccessorInfo &p_info)
+void Encoder::BitrateGetter(Local<String> p_property, const PropertyCallbackInfo<Value> &p_info)
 {
     Encoder *self = ObjectWrap::Unwrap<Encoder>(p_info.Holder());
-    return Integer::New(self->m_bitrate);
+    p_info.GetReturnValue().Set(Integer::New(self->m_bitrate, p_info.GetIsolate()));
 }
 
 void Encoder::threadRunner(void *p_data)
@@ -229,23 +265,21 @@ void Encoder::threadRunner(void *p_data)
             }
         }
 
-        EncodeTask *task = self->m_in.front();
+        self->m_task = self->m_in.front();
         self->m_in.pop();
 
         uv_mutex_unlock(&self->m_inLock);
 
         // Encode input samples
         self->encode(
-            task->samples,
-            task->sampleslen,
-            &task->bufferdata,
-            &task->bufferlen
+            self->m_task->samples,
+            self->m_task->numsamples
         );
 
         // Push encoded data
         uv_mutex_lock(&self->m_outLock);
 
-        self->m_out.push(task);
+        self->m_out.push(self->m_task);
 
         uv_mutex_unlock(&self->m_outLock);
 
@@ -257,7 +291,7 @@ void Encoder::outSignaller(uv_async_t *p_async, int p_status)
 {
     Encoder *self = reinterpret_cast<Encoder*>(p_async->data);
 
-    HandleScope scope;
+    HandleScope scope(Isolate::GetCurrent());
 
     uv_mutex_lock(&self->m_outLock);
     while(!self->m_out.empty())
@@ -265,33 +299,54 @@ void Encoder::outSignaller(uv_async_t *p_async, int p_status)
         EncodeTask *out = self->m_out.front();
         self->m_out.pop();
 
-        if(!out->bufferdata)
-        {
-            delete out;
-            continue;
-        }
-
         uv_mutex_unlock(&self->m_outLock);
 
-        Buffer *sbuf = Buffer::New(reinterpret_cast<const char*>(out->bufferdata), out->bufferlen);
         out->frame.Dispose();
-        delete out->bufferdata;
+
+        std::list<EncodeOutput>::const_iterator iter;
+        for(iter = out->out.begin(); iter != out->out.end(); ++iter)
+        {
+            Local<Object> buf = Buffer::Use(reinterpret_cast<char*>(iter->data), iter->length);
+
+            // Emit frame event
+            Handle<Value> args[2] = {
+                String::New("data"),
+                buf
+            };
+
+            MakeCallback(self->handle(), "emit", 2, args);
+        }
+
         delete out;
-
-        // Create fast buffer
-        Local<Function> nodeBufferConstructor = Local<Function>::Cast(Context::GetCurrent()->Global()->Get(String::New("Buffer")));
-        Handle<Value> bufargv[3] = { sbuf->handle_, Integer::New(out->bufferlen), Integer::New(0) };
-        Local<Object> buf = nodeBufferConstructor->NewInstance(3, bufargv);
-
-        // Emit frame event
-        Handle<Value> args[2] = {
-            String::New("data"),
-            buf
-        };
-
-        MakeCallback(self->handle_, "emit", 2, args);
 
         uv_mutex_lock(&self->m_outLock);
     }
     uv_mutex_unlock(&self->m_outLock);
+}
+
+void Encoder::errorSignaller(uv_async_t *p_async, int p_status)
+{
+    Encoder *self = reinterpret_cast<Encoder*>(p_async->data);
+
+    HandleScope scope(Isolate::GetCurrent());
+
+    uv_mutex_lock(&self->m_errorLock);
+    while(!self->m_errors.empty())
+    {
+        std::string err = self->m_errors.front();
+        self->m_errors.pop();
+
+        uv_mutex_unlock(&self->m_errorLock);
+
+        // Emit error event
+        Handle<Value> args[2] = {
+            String::New("error"),
+            String::New(err.c_str())
+        };
+
+        MakeCallback(self->handle(), "emit", 2, args);
+
+        uv_mutex_lock(&self->m_errorLock);
+    }
+    uv_mutex_unlock(&self->m_errorLock);
 }

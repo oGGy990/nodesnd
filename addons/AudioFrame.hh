@@ -18,13 +18,13 @@ public:
     static AudioFrame *New(int p_channels, int p_samplerate, float *p_samples, unsigned int p_samplelen);
 
 private:
-    static v8::Handle<v8::Value> New(const v8::Arguments &p_args);
+    static void New(const v8::FunctionCallbackInfo<v8::Value> &p_args);
 
-    static v8::Handle<v8::Value> ChannelsGetter(v8::Local<v8::String> p_property, const v8::AccessorInfo &p_info);
-    static v8::Handle<v8::Value> SamplerateGetter(v8::Local<v8::String> p_property, const v8::AccessorInfo &p_info);
-    static v8::Handle<v8::Value> DataGetter(v8::Local<v8::String> p_property, const v8::AccessorInfo &p_info);
+    static void ChannelsGetter(v8::Local<v8::String> p_property, const v8::PropertyCallbackInfo<v8::Value> &p_info);
+    static void SamplerateGetter(v8::Local<v8::String> p_property, const v8::PropertyCallbackInfo<v8::Value> &p_info);
+    static void DataGetter(v8::Local<v8::String> p_property, const v8::PropertyCallbackInfo<v8::Value> &p_info);
 
-    static v8::Persistent<v8::FunctionTemplate> m_constructorTemplate;
+    static v8::Persistent<v8::Function> m_constructorTemplate;
 
     AudioFrame(int p_channels, int p_samplerate, v8::Local<v8::Object> p_buffer);
     AudioFrame(const AudioFrame &p_other);
